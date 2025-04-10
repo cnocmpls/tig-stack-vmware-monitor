@@ -25,7 +25,7 @@ It features automated setup for InfluxDB (user, org, bucket, token), dynamic gen
 
 1.  **Clone Repository:**
     ```bash
-    git clone <your-repo-url> tig-stack-vmware-monitor
+    git clone https://github.com/cnocmpls/tig-stack-vmware-monitor tig-stack-vmware-monitor
     cd tig-stack-vmware-monitor
     ```
 
@@ -48,7 +48,7 @@ It features automated setup for InfluxDB (user, org, bucket, token), dynamic gen
     * **Edit `.env`:** Open the `.env` file and replace **all** placeholder values (`ReplaceWith...`, `your-vcenter...`, etc.) with your actual InfluxDB credentials, vCenter details, Grafana admin password, and the generated InfluxDB token.
 
 3.  **Download Grafana Dashboards:**
-    * Download the JSON models for the desired VMware dashboards from [Grafana.com/grafana/dashboards](https://grafana.com/grafana/dashboards/). The dashboards specified in the original request were IDs: `8159`, `8168`, `8165`, `8162`.
+    * Download the JSON models for the desired VMware dashboards from [Grafana.com/grafana/dashboards](https://grafana.com/grafana/dashboards/). Some awesome dashboards by jorgedelacruz are included here with IDs: `8159`, `8168`, `8165`, `8162`.
     * Place the downloaded `.json` files directly inside the `grafana/dashboards/` directory.
 
 4.  **Make Setup Script Executable:**
@@ -89,14 +89,8 @@ docker compose down
 **Cleaning Up (Removes Containers, Networks, Data Volumes):**
 
 ```bash
-# Stop and remove containers/networks
-docker compose down
-
-# Remove persistent data volumes (WARNING: Deletes all collected data)
-docker volume rm tig-stack-vmware-monitor_influxdb-data
-docker volume rm tig-stack-vmware-monitor_grafana-data
-# Note: Adjust volume names if your project name differs from 'tig-stack-vmware-monitor'
-# Check names with 'docker volume ls'
+# Stop and remove containers/networks/volumes
+docker compose down -v
 ```
 
 ## Troubleshooting
