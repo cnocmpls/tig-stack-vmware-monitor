@@ -1,0 +1,25 @@
+# Ignore sensitive environment variables file
+.env
+
+# Ignore dynamically generated configuration and dashboards
+config-output/
+
+# Ignore Grafana data volume directory if mapped to host (we use named volumes)
+# grafana-data/
+
+# Ignore InfluxDB data/config volume directories if mapped to host (we use named volumes)
+# influxdb-data/
+# influxdb-config/
+
+# Ignore downloaded dashboard JSON files (user responsibility)
+grafana/dashboards/*.json
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo

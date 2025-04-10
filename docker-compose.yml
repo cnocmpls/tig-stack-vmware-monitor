@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  influxdb:
+    image: influxdb:latest
+    container_name: ${COMPOSE_PROJECT_NAME}_influxdb
+    restart: unless-stopped
+    networks:
+      - monitoring-net
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  influxdb-setup:
+    image: alpine:latest
+    container_name: ${COMPOSE_PROJECT_NAME}_influxdb-setup
+    restart: on-failure
+    networks:
+      - monitoring-net
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    volumes:
+      # Mount the setup script itself
+      - ./influxdb-setup:/scripts
+      # Mount where generated configs/dashboards will be written
+      - ./config-output:/output:z
+      # Mount original dashboards read-only as input
+      - ./grafana/dashboards:/dashboards-input:ro
+    environment:
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - OUTPUT_DIR=/output
+      - INPUT_DASH_DIR=/dashboards-input # Tell script where originals are
+    command: >
+      sh -c "apk add --no-cache bash jq &&  # Install bash AND jq
+             chmod +x /scripts/setup.sh &&
+             bash /scripts/setup.sh"
+
+  telegraf:
+    image: telegraf:latest
+    container_name: ${COMPOSE_PROJECT_NAME}_telegraf
+    restart: unless-stopped
+    networks:
+      - monitoring-net
+    depends_on:
+      influxdb-setup:
+        condition: service_completed_successfully
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      # Mount the generated output config from the setup container
+      - ./config-output/telegraf:/etc/telegraf/telegraf.d:ro
+    environment:
+      - VCENTER_URL=${VCENTER_URL}
+      - VCENTER_USERNAME=${VCENTER_USERNAME}
+      - VCENTER_PASSWORD=${VCENTER_PASSWORD}
+      - HOSTNAME=telegraf-vmware # Set a specific hostname for Telegraf agent
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ${COMPOSE_PROJECT_NAME}_grafana
+    restart: unless-stopped
+    networks:
+      - monitoring-net
+    ports:
+      - "3000:3000"
+    depends_on:
+      influxdb-setup:
+        condition: service_completed_successfully
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Mount the generated datasource config
+      - ./config-output/grafana-datasource:/etc/grafana/provisioning/datasources:ro
+      # Mount the static dashboard PROVIDER config
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Mount the MODIFIED dashboards from the setup container's output
+      - ./config-output/grafana-dashboards:/grafana-dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_PROVISIONING_PATH=/etc/grafana/provisioning # Default path Grafana looks in
+      - GF_LOG_LEVEL=info
+      - GF_AUTH_ANONYMOUS_ENABLED=false # Recommended for security
+      # Optional: Set root URL if behind reverse proxy
+      # - GF_SERVER_ROOT_URL=http://your-domain.com/grafana
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  monitoring-net:
+    driver: bridge
+    name: ${COMPOSE_PROJECT_NAME}_monitoring-net # Explicit network name
+
+volumes:
+  # Use Docker named volumes for persistent data
+  influxdb-data:
+    name: ${COMPOSE_PROJECT_NAME}_influxdb-data # Explicit volume name
+  grafana-data:
+    name: ${COMPOSE_PROJECT_NAME}_grafana-data # Explicit volume name
