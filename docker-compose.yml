@@ -1,6 +1,20 @@
-version: '3.8'
-
 services:
+  certs-setup:
+    image: alpine:latest
+    container_name: ${COMPOSE_PROJECT_NAME}_certs-setup
+    # This container runs once to generate certs if they don't exist
+    restart: "no"
+    volumes:
+      # Mount output directory where certs will be written
+      - ./config-output:/output:z # Use :z for potential SELinux
+      # Mount the cert generation script
+      - ./setup-scripts:/scripts:z
+    environment:
+      # Pass output directory path to the script
+      - OUTPUT_DIR=/output
+    command: >
+      sh -c "chmod +x /scripts/generate_certs.sh && /scripts/generate_certs.sh"
+
   influxdb:
     image: influxdb:latest
     container_name: ${COMPOSE_PROJECT_NAME}_influxdb
@@ -8,48 +22,73 @@ services:
     networks:
       - monitoring-net
     ports:
-      - "8086:8086"
+      - "8086:8086" # Port remains 8086, HTTPS traffic
+    # Start only after certs are guaranteed to exist (or script exited)
+    depends_on:
+      certs-setup:
+        condition: service_completed_successfully
     volumes:
       - influxdb-data:/var/lib/influxdb2
+      # Mount the DIRECTORY containing the generated certs/keys (read-only)
+      - ./config-output/certs/internal:/etc/ssl/influxdb:ro
     environment:
+      # InfluxDB Setup
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME}
       - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD}
       - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}
       - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN} # Use pre-defined Operator token
+#      - DOCKER_INFLUXDB_INIT_RETENTION=30d # Adjust or remove if needed
+
+      # Enable TLS using mounted certificates
+      - INFLUXD_TLS_CERT=/etc/ssl/influxdb/influxdb.pem
+      - INFLUXD_TLS_KEY=/etc/ssl/influxdb/influxdb.key
+
+      # Timezone
+      - TZ=Asia/Kolkata
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      # Check HTTPS endpoint, ignore self-signed cert for healthcheck
+      test: ["CMD", "curl", "-f", "-k", "https://localhost:8086/health"]
       interval: 10s
       timeout: 5s
       retries: 15
 
-  influxdb-setup:
+  config-setup: # Renamed from influxdb-setup
     image: alpine:latest
-    container_name: ${COMPOSE_PROJECT_NAME}_influxdb-setup
+    container_name: ${COMPOSE_PROJECT_NAME}_config-setup # Renamed
     restart: on-failure
     networks:
       - monitoring-net
+    # Runs AFTER influxdb is healthy (meaning it started successfully with TLS)
     depends_on:
       influxdb:
         condition: service_healthy
     volumes:
-      # Mount the setup script itself
-      - ./influxdb-setup:/scripts
-      # Mount where generated configs/dashboards will be written
+      # Mount the main config setup script
+      - ./setup-scripts:/scripts:z
+      # Mount the output directory for all generated files
       - ./config-output:/output:z
-      # Mount original dashboards read-only as input
+      # Mount original dashboards as input
       - ./grafana/dashboards:/dashboards-input:ro
+      # Mount generated internal CA cert back into this container for curl verification
+      - ./config-output/certs/internal/ca.pem:/etc/ssl/certs/tig_internal_ca.pem:ro
     environment:
+      # InfluxDB connection details (Operator Token for setup tasks)
       - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
       - INFLUXDB_ORG=${INFLUXDB_ORG}
       - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      # Script paths
       - OUTPUT_DIR=/output
-      - INPUT_DASH_DIR=/dashboards-input # Tell script where originals are
+      - INPUT_DASH_DIR=/dashboards-input
+      # vCenter details for VMCA download
+      - VCENTER_URL=${VCENTER_URL}
+      # Timezone
+      - TZ=Asia/Kolkata
     command: >
-      sh -c "apk add --no-cache bash jq &&  # Install bash AND jq
-             chmod +x /scripts/setup.sh &&
-             bash /scripts/setup.sh"
+      sh -c "apk add --no-cache bash jq curl unzip && chmod +x /scripts/setup_configs.sh && bash /scripts/setup_configs.sh
+             # Use bash if script needs it (recommended for robustness)
+             # if command -v bash &> /dev/null; then exec bash /scripts/setup_configs.sh; else exec sh /scripts/setup_configs.sh; fi"
 
   telegraf:
     image: telegraf:latest
@@ -57,45 +96,68 @@ services:
     restart: unless-stopped
     networks:
       - monitoring-net
+    # Start only after config-setup is done
     depends_on:
-      influxdb-setup:
+      config-setup:
         condition: service_completed_successfully
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
-      # Mount the generated output config from the setup container
+      # Mount generated output config (uses Telegraf Token, HTTPS)
       - ./config-output/telegraf:/etc/telegraf/telegraf.d:ro
+      # Mount internal CA cert (for output plugin verification)
+      - ./config-output/certs/internal/ca.pem:/etc/telegraf/certs/internal/ca.pem:ro
+      # Mount downloaded vCenter CA cert (for input plugin verification)
+      - ./config-output/certs/vcenter-ca.pem:/etc/telegraf/certs/vcenter-ca.pem:ro
     environment:
+      # vSphere credentials
       - VCENTER_URL=${VCENTER_URL}
       - VCENTER_USERNAME=${VCENTER_USERNAME}
       - VCENTER_PASSWORD=${VCENTER_PASSWORD}
-      - HOSTNAME=telegraf-vmware # Set a specific hostname for Telegraf agent
+      # Agent Hostname
+      - HOSTNAME=telegraf-vmware
+      # Timezone
+      - TZ=Asia/Kolkata
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana-oss:latest
     container_name: ${COMPOSE_PROJECT_NAME}_grafana
     restart: unless-stopped
     networks:
       - monitoring-net
     ports:
-      - "3000:3000"
+      - "3000:3000" # Port remains 3000, HTTPS traffic
+    # Start only after config-setup is done
     depends_on:
-      influxdb-setup:
+      config-setup:
         condition: service_completed_successfully
     volumes:
       - grafana-data:/var/lib/grafana
-      # Mount the generated datasource config
+      # Mount generated datasource config (TLS enabled, uses read-only token)
       - ./config-output/grafana-datasource:/etc/grafana/provisioning/datasources:ro
-      # Mount the static dashboard PROVIDER config
+      # Mount static dashboard provider config
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      # Mount the MODIFIED dashboards from the setup container's output
+      # Mount processed/modified dashboards
       - ./config-output/grafana-dashboards:/grafana-dashboards:ro
+      # Mount the DIRECTORY containing the certs/keys (read-only)
+      - ./config-output/certs/internal/ca.pem:/etc/grafana/certs/ca.pem:ro
+      - ./config-output/certs/internal/grafana.pem:/etc/grafana/grafana.pem:ro
+      - ./config-output/certs/internal/grafana.key:/etc/grafana/grafana.key:ro
     environment:
+      # Admin Password
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      - GF_PROVISIONING_PATH=/etc/grafana/provisioning # Default path Grafana looks in
+      # Enable HTTPS using mounted certificates
+#      - GF_SERVER_PROTOCOL=https
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/grafana.pem
+      - GF_SERVER_KEY_FILE=/etc/grafana/certs/grafana.key
+#      - GF_SERVER_ENFORCE_DOMAIN=False
+#      - GF_SERVER_HTTP_PORT=3000
+      # Other Grafana settings
+      - GF_PROVISIONING_PATH=/etc/grafana/provisioning
+      - SSL_CERT_FILE=/etc/grafana/certs/ca.pem
       - GF_LOG_LEVEL=info
-      - GF_AUTH_ANONYMOUS_ENABLED=false # Recommended for security
-      # Optional: Set root URL if behind reverse proxy
-      # - GF_SERVER_ROOT_URL=http://your-domain.com/grafana
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      # Timezone
+      - TZ=Asia/Kolkata
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
       interval: 10s
@@ -105,11 +167,10 @@ services:
 networks:
   monitoring-net:
     driver: bridge
-    name: ${COMPOSE_PROJECT_NAME}_monitoring-net # Explicit network name
+    name: ${COMPOSE_PROJECT_NAME}_monitoring-net
 
 volumes:
-  # Use Docker named volumes for persistent data
   influxdb-data:
-    name: ${COMPOSE_PROJECT_NAME}_influxdb-data # Explicit volume name
+    name: ${COMPOSE_PROJECT_NAME}_influxdb-data
   grafana-data:
-    name: ${COMPOSE_PROJECT_NAME}_grafana-data # Explicit volume name
+    name: ${COMPOSE_PROJECT_NAME}_grafana-data
